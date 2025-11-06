@@ -7,7 +7,8 @@ RUN mkdir -p /etc/postgresql && \
 fsync = off
 synchronous_commit = off
 full_page_writes = off
-wal_level = minimal
+wal_level = replica        # must be at least replica for extensions
+max_wal_senders = 0        # disable streaming replication explicitly
 shared_buffers = 512MB
 work_mem = 64MB
 maintenance_work_mem = 256MB
@@ -16,9 +17,5 @@ random_page_cost = 1
 seq_page_cost = 1
 EOF
 
-# Ensure it gets loaded during initdb (affects postgresql.conf)
+# Ensure it gets loaded by default Postgres entrypoint
 RUN echo "include '/etc/postgresql/turbo.conf'" >> /usr/share/postgresql/postgresql.conf.sample
-
-# No need for these (they're defaults and harmless, but not needed)
-# ENV POSTGRES_INITDB_ARGS="--data-checksums"
-# ENV PGDATA=/var/lib/postgresql/data
