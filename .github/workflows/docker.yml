@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write # lets the LAST_BUILD commit step push
       packages: write
 
     steps:
@@ -32,6 +32,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and Push image
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -45,6 +46,7 @@ jobs:
           platforms: linux/amd64
 
       - name: Build & Push turbo
+        id: build_turbo
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -56,3 +58,47 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/pgvector-postgis:pg16-turbo
             ghcr.io/${{ github.repository_owner }}/pgvector-postgis:pg16-turbo-${{ steps.date.outputs.date }}
             ghcr.io/${{ github.repository_owner }}/pgvector-postgis:latest-turbo
+
+      # Fails the run on fixable HIGH/CRITICAL findings. Both images are already
+      # pushed by this point; the failure is what triggers the Slack alert below.
+      # Only the base image is scanned: turbo adds a config file and no packages.
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          image-ref: ghcr.io/${{ github.repository_owner }}/pgvector-postgis@${{ steps.build.outputs.digest }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      # Records the last build in git history. This commit also counts as repo
+      # activity, which keeps GitHub from disabling the schedule after 60 days.
+      - name: Record last build
+        if: always() && steps.build.outcome == 'success' && steps.build_turbo.outcome == 'success' && github.event_name == 'schedule'
+        run: |
+          {
+            echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "digest=${{ steps.build.outputs.digest }}"
+            echo "turbo_digest=${{ steps.build_turbo.outputs.digest }}"
+          } > LAST_BUILD
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add LAST_BUILD
+          git commit -m "Record last build [skip ci]"
+          # main may have advanced during the build; rebase onto it and retry.
+          for attempt in 1 2 3; do
+            git pull --rebase origin "$GITHUB_REF_NAME" && git push && exit 0
+            sleep $((attempt * 5))
+          done
+          exit 1
+
+      - name: Notify Slack on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v2.1.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            text: ":rotating_light: ${{ github.repository }} build failed (Trivy findings or build error): ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
